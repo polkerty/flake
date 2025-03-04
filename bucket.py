@@ -4,9 +4,37 @@ import psycopg2
 import pandas as pd
 from scipy.stats import chi2
 
-def get_monthly_data(conn, animal=None):
-    # Query to get monthly aggregates (only buckets with > 25 events)
-    base_query = """
+# Mapping for allowed since periods.
+ALLOWED_PERIODS = {
+    "day": "1 day",
+    "week": "1 week",
+    "month": "1 month",
+    "year": "1 year"
+}
+
+def get_monthly_data(conn, animal=None, since=None):
+    """
+    Retrieve monthly aggregated failure data from the run table.
+    Optionally filter by a specific animal and/or only include events since a given period.
+    Only monthly buckets with more than 25 total events are returned.
+    """
+    # Build the WHERE clause.
+    clauses = []
+    params = []
+    if animal:
+        clauses.append("animal = %s")
+        params.append(animal)
+    if since:
+        if since not in ALLOWED_PERIODS:
+            raise ValueError("Invalid 'since' parameter. Must be one of: day, week, month, year.")
+        # We use now() and the interval literal.
+        clauses.append(f"snapshot >= now() - interval '{ALLOWED_PERIODS[since]}'")
+    
+    where_clause = ""
+    if clauses:
+        where_clause = "WHERE " + " AND ".join(clauses)
+    
+    query = f"""
     SELECT
         animal,
         date_trunc('month', snapshot) AS month,
@@ -17,21 +45,31 @@ def get_monthly_data(conn, animal=None):
     GROUP BY animal, date_trunc('month', snapshot)
     ORDER BY animal, month;
     """
-    where_clause = ""
-    if animal:
-        where_clause = "WHERE animal = %s"
-    query = base_query.format(where_clause=where_clause)
-    if animal:
-        df = pd.read_sql(query, conn, params=(animal,))
-    else:
-        df = pd.read_sql(query, conn)
-    # Only consider monthly buckets with more than 25 events
+    df = pd.read_sql(query, conn, params=params)
+    # Only consider monthly buckets with more than 25 events.
     df = df[df['total'] > 25]
     return df
 
-def get_overall_dates(conn, animal=None):
-    # Query to get overall first and last event dates per animal
-    base_query = """
+def get_overall_dates(conn, animal=None, since=None):
+    """
+    Retrieve overall first and last event dates from the run table.
+    Optionally filter by a specific animal and/or limit data to a given time period.
+    """
+    clauses = []
+    params = []
+    if animal:
+        clauses.append("animal = %s")
+        params.append(animal)
+    if since:
+        if since not in ALLOWED_PERIODS:
+            raise ValueError("Invalid 'since' parameter. Must be one of: day, week, month, year.")
+        clauses.append(f"snapshot >= now() - interval '{ALLOWED_PERIODS[since]}'")
+    
+    where_clause = ""
+    if clauses:
+        where_clause = "WHERE " + " AND ".join(clauses)
+    
+    query = f"""
     SELECT
         animal,
         MIN(snapshot) AS first_event,
@@ -41,14 +79,7 @@ def get_overall_dates(conn, animal=None):
     GROUP BY animal
     ORDER BY animal;
     """
-    where_clause = ""
-    if animal:
-        where_clause = "WHERE animal = %s"
-    query = base_query.format(where_clause=where_clause)
-    if animal:
-        df = pd.read_sql(query, conn, params=(animal,))
-    else:
-        df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn, params=params)
     return df
 
 def analyze_animal(df_monthly, overall_dates, animal):
@@ -56,7 +87,7 @@ def analyze_animal(df_monthly, overall_dates, animal):
     data = df_monthly[df_monthly['animal'] == animal].copy()
     if data.empty:
         print(f"No monthly buckets with >25 events for animal: {animal}")
-        return
+        return None, None
 
     # Overall totals.
     total_failures = data['failures'].sum()
@@ -76,9 +107,11 @@ def analyze_animal(df_monthly, overall_dates, animal):
         bucket_total = row['total']
         observed_failures = row['failures']
         observed_successes = bucket_total - observed_failures
+        
         # Expected counts in this bucket (proportional to bucket size).
         expected_failures = total_failures * (bucket_total / total_events)
         expected_successes = total_successes * (bucket_total / total_events)
+        
         if expected_failures > 0:
             chi_square_stat += (observed_failures - expected_failures) ** 2 / expected_failures
         if expected_successes > 0:
@@ -165,9 +198,11 @@ def analyze_all_animals(df_monthly, overall_dates):
 def main():
     parser = argparse.ArgumentParser(description="Chi-square analysis of run table monthly failure rates.")
     parser.add_argument("--animal", type=str, help="Analyze a specific animal (optional)")
+    parser.add_argument("--since", type=str, choices=["day", "week", "month", "year"],
+                        help="Limit data to events since this time period (e.g., 'day', 'week', 'month', 'year')")
     args = parser.parse_args()
 
-    # Connect to database using user jbrazeal.
+    # Connect to the database using user jbrazeal.
     conn = psycopg2.connect(
         dbname="flake",
         host="localhost",
@@ -176,12 +211,11 @@ def main():
         password=""        # adjust if needed
     )
 
-    df_monthly = get_monthly_data(conn, animal=args.animal)
-    overall_dates = get_overall_dates(conn, animal=args.animal)
+    df_monthly = get_monthly_data(conn, animal=args.animal, since=args.since)
+    overall_dates = get_overall_dates(conn, animal=args.animal, since=args.since)
     conn.close()
 
     if args.animal:
-        # Analyze a specific animal.
         summary, detailed = analyze_animal(df_monthly, overall_dates, args.animal)
         if summary is None:
             print(f"No sufficient data for animal '{args.animal}'.")
@@ -190,11 +224,9 @@ def main():
             for key, value in summary.items():
                 print(f"{key:20s}: {value}")
             print("\nDetailed monthly data:")
-            # Format the detailed data.
             detailed = detailed.sort_values("month")
             print(detailed.to_string(index=False))
     else:
-        # Analyze all animals.
         summary_df = analyze_all_animals(df_monthly, overall_dates)
         print("Summary for all animals:")
         print(summary_df.to_string(index=False))
