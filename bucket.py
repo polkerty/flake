@@ -176,6 +176,11 @@ def analyze_all_animals(df_monthly, overall_dates):
         test_result = ("Reject Null Hypothesis: Rates are different across months"
                        if p_value < 0.05 else
                        "Fail to Reject Null Hypothesis: No significant difference in rates")
+        
+        # Compute spike: difference between worst monthly failure rate and overall rate.
+        monthly_rates = group['failures'] / group['total']
+        max_rate = monthly_rates.max()
+        spike = max_rate - overall_failure_rate if overall_failure_rate is not None else None
 
         summaries.append({
             "animal": animal,
@@ -188,11 +193,13 @@ def analyze_all_animals(df_monthly, overall_dates):
             "chi_square_stat": chi_square_stat,
             "degrees_of_freedom": dof,
             "p_value": p_value,
+            "spike": spike,
             "result": test_result
         })
     if summaries:
-        # Order by highest failure rate descending.
-        return pd.DataFrame(summaries).sort_values("failure_rate", ascending=False, na_position="last")
+        df_summary = pd.DataFrame(summaries)
+        # Sorting will be handled in main based on the --spikes flag.
+        return df_summary
     else:
         return pd.DataFrame()
 
@@ -204,7 +211,7 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
     than the animal's overall failure rate, the cell is colored red.
     """
     # Filter to top_n animals.
-    top_animals = summary_df.sort_values("failure_rate", ascending=False).head(top_n)
+    top_animals = summary_df.head(top_n)
     animal_list = top_animals["animal"].tolist()
 
     # Filter monthly data for these animals.
@@ -229,13 +236,11 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
         rate = failures / total if total > 0 else 0
         # Do a one-tailed binomial test comparing this cell to overall rate.
         overall_rate = overall_rates.get(animal, 0)
-        # Only test if the cell's rate is higher than overall.
         cell_significant = False
         if total > 0 and rate > overall_rate:
             bt = binomtest(failures, n=total, p=overall_rate, alternative="greater")
             if bt.pvalue < 0.05:
                 cell_significant = True
-        # Format cell content.
         content = f"{rate:.1%} (n={total})"
         grid[animal][month] = (content, cell_significant)
 
@@ -253,13 +258,11 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
     html.append("</head><body>")
     html.append("<h2>Top {} Animals Failure Rate Grid</h2>".format(top_n))
     html.append("<table>")
-    # Header row.
     header = "<tr><th>Animal</th>"
     for month in all_months:
         header += f"<th>{month}</th>"
     header += "</tr>"
     html.append(header)
-    # Data rows.
     for animal in animal_list:
         row_html = f"<tr><td>{animal}</td>"
         for month in all_months:
@@ -276,7 +279,6 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
     html.append("</body></html>")
     html_str = "\n".join(html)
 
-    # Write to file.
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(html_str)
     print(f"Grid HTML file written to {output_file}")
@@ -288,9 +290,9 @@ def main():
     parser.add_argument("--since", type=str, choices=["day", "week", "month", "year"],
                         help="Limit data to events since this time period (e.g., 'day', 'week', 'month', 'year')")
     parser.add_argument("--grid", type=int, help="Generate an HTML grid for the top x animals")
+    parser.add_argument("--spikes", action="store_true", help="Sort grid by spike (difference between worst monthly rate and overall rate)")
     args = parser.parse_args()
 
-    # Connect to the database using user jbrazeal.
     conn = psycopg2.connect(
         dbname="flake",
         host="localhost",
@@ -305,16 +307,18 @@ def main():
 
     # If grid option is provided, generate the HTML grid.
     if args.grid:
-        # For grid view, we want all animals with sufficient data.
         summary_df = analyze_all_animals(df_monthly, overall_dates)
         if summary_df.empty:
             print("No animals with sufficient data to generate grid.")
         else:
+            # If --spikes flag is provided, sort by spike difference; otherwise by overall failure rate.
+            if args.spikes:
+                summary_df = summary_df.sort_values("spike", ascending=False, na_position="last")
+            else:
+                summary_df = summary_df.sort_values("failure_rate", ascending=False, na_position="last")
             generate_grid_html(summary_df, df_monthly, top_n=args.grid)
-        # Exit after grid generation.
         return
 
-    # If analyzing a specific animal, show detailed view.
     if args.animal:
         summary, detailed = analyze_animal(df_monthly, overall_dates, args.animal)
         if summary is None:
@@ -326,11 +330,12 @@ def main():
             print("\nDetailed monthly data (ordered by date ascending):")
             print(detailed.to_string(index=False))
     else:
-        # Otherwise, show summary for all animals, ordered by highest failure rate descending.
         summary_df = analyze_all_animals(df_monthly, overall_dates)
         if summary_df.empty:
             print("No animals with sufficient data to make a decision.")
         else:
+            # Default sorting: overall failure rate descending.
+            summary_df = summary_df.sort_values("failure_rate", ascending=False, na_position="last")
             print("Summary for all animals (ordered by highest failure rate descending):")
             print(summary_df.to_string(index=False))
 
