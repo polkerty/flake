@@ -18,7 +18,6 @@ def get_monthly_data(conn, animal=None, since=None):
     Optionally filter by a specific animal and/or only include events since a given period.
     Only monthly buckets with more than 25 total events are returned.
     """
-    # Build the WHERE clause.
     clauses = []
     params = []
     if animal:
@@ -27,7 +26,6 @@ def get_monthly_data(conn, animal=None, since=None):
     if since:
         if since not in ALLOWED_PERIODS:
             raise ValueError("Invalid 'since' parameter. Must be one of: day, week, month, year.")
-        # We use now() and the interval literal.
         clauses.append(f"snapshot >= now() - interval '{ALLOWED_PERIODS[since]}'")
     
     where_clause = ""
@@ -85,8 +83,8 @@ def get_overall_dates(conn, animal=None, since=None):
 def analyze_animal(df_monthly, overall_dates, animal):
     # Filter data for the specific animal.
     data = df_monthly[df_monthly['animal'] == animal].copy()
-    if data.empty:
-        print(f"No monthly buckets with >25 events for animal: {animal}")
+    if data.empty or len(data) < 2:
+        print(f"Not enough monthly buckets with >25 events for animal: {animal}")
         return None, None
 
     # Overall totals.
@@ -108,7 +106,6 @@ def analyze_animal(df_monthly, overall_dates, animal):
         observed_failures = row['failures']
         observed_successes = bucket_total - observed_failures
         
-        # Expected counts in this bucket (proportional to bucket size).
         expected_failures = total_failures * (bucket_total / total_events)
         expected_successes = total_successes * (bucket_total / total_events)
         
@@ -143,11 +140,13 @@ def analyze_animal(df_monthly, overall_dates, animal):
         "p_value": p_value,
         "result": test_result
     }
-    return summary, data
+    return summary, data.sort_values("month")  # Order individual animal view by date ascending
 
 def analyze_all_animals(df_monthly, overall_dates):
     summaries = []
     for animal, group in df_monthly.groupby('animal'):
+        if len(group) < 2:
+            continue  # Skip animals with insufficient monthly buckets.
         total_failures = group['failures'].sum()
         total_events = group['total'].sum()
         total_successes = total_events - total_failures
@@ -172,13 +171,11 @@ def analyze_all_animals(df_monthly, overall_dates):
 
         dof = len(group) - 1
         if dof <= 0:
-            p_value = None
-            test_result = "Not enough monthly buckets to test"
-        else:
-            p_value = chi2.sf(chi_square_stat, dof)
-            test_result = ("Reject Null Hypothesis: Rates are different across months"
-                           if p_value < 0.05 else
-                           "Fail to Reject Null Hypothesis: No significant difference in rates")
+            continue  # Skip animals with insufficient data for a chi-square test.
+        p_value = chi2.sf(chi_square_stat, dof)
+        test_result = ("Reject Null Hypothesis: Rates are different across months"
+                       if p_value < 0.05 else
+                       "Fail to Reject Null Hypothesis: No significant difference in rates")
 
         summaries.append({
             "animal": animal,
@@ -193,10 +190,15 @@ def analyze_all_animals(df_monthly, overall_dates):
             "p_value": p_value,
             "result": test_result
         })
-    return pd.DataFrame(summaries).sort_values("p_value", na_position="last")
+    if summaries:
+        # Order by highest failure rate descending.
+        return pd.DataFrame(summaries).sort_values("failure_rate", ascending=False, na_position="last")
+    else:
+        return pd.DataFrame()
 
 def main():
-    parser = argparse.ArgumentParser(description="Chi-square analysis of run table monthly failure rates.")
+    parser = argparse.ArgumentParser(
+        description="Chi-square analysis of run table monthly failure rates.")
     parser.add_argument("--animal", type=str, help="Analyze a specific animal (optional)")
     parser.add_argument("--since", type=str, choices=["day", "week", "month", "year"],
                         help="Limit data to events since this time period (e.g., 'day', 'week', 'month', 'year')")
@@ -218,18 +220,20 @@ def main():
     if args.animal:
         summary, detailed = analyze_animal(df_monthly, overall_dates, args.animal)
         if summary is None:
-            print(f"No sufficient data for animal '{args.animal}'.")
+            print(f"No sufficient data for animal '{args.animal}' to make a decision.")
         else:
             print("Summary:")
             for key, value in summary.items():
                 print(f"{key:20s}: {value}")
-            print("\nDetailed monthly data:")
-            detailed = detailed.sort_values("month")
+            print("\nDetailed monthly data (ordered by date ascending):")
             print(detailed.to_string(index=False))
     else:
         summary_df = analyze_all_animals(df_monthly, overall_dates)
-        print("Summary for all animals:")
-        print(summary_df.to_string(index=False))
+        if summary_df.empty:
+            print("No animals with sufficient data to make a decision.")
+        else:
+            print("Summary for all animals (ordered by highest failure rate descending):")
+            print(summary_df.to_string(index=False))
 
 if __name__ == "__main__":
     main()
