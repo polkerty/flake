@@ -2,7 +2,7 @@
 import argparse
 import psycopg2
 import pandas as pd
-from scipy.stats import chi2
+from scipy.stats import chi2, binomtest
 
 # Mapping for allowed since periods.
 ALLOWED_PERIODS = {
@@ -196,12 +196,98 @@ def analyze_all_animals(df_monthly, overall_dates):
     else:
         return pd.DataFrame()
 
+def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
+    """
+    Generate an HTML grid showing the top_n animals (rows) and months (columns).
+    Each cell shows the monthly failure rate and total count.
+    If the monthly failure rate is significantly higher (one-tailed binomial test, p < 0.05)
+    than the animal's overall failure rate, the cell is colored red.
+    """
+    # Filter to top_n animals.
+    top_animals = summary_df.sort_values("failure_rate", ascending=False).head(top_n)
+    animal_list = top_animals["animal"].tolist()
+
+    # Filter monthly data for these animals.
+    df = df_monthly[df_monthly["animal"].isin(animal_list)].copy()
+    # Ensure 'month' is a datetime; then format as YYYY-MM.
+    df["month_str"] = pd.to_datetime(df["month"]).dt.strftime("%Y-%m")
+    
+    # Get the union of all months for these animals, sorted ascending.
+    all_months = sorted(df["month_str"].unique())
+
+    # Build grid data: a dict of dict: grid[animal][month] = cell content
+    grid = {animal: {month: "" for month in all_months} for animal in animal_list}
+    # Also, get overall failure rates for each animal from summary.
+    overall_rates = top_animals.set_index("animal")["failure_rate"].to_dict()
+
+    # For each record, fill the grid.
+    for _, row in df.iterrows():
+        animal = row["animal"]
+        month = row["month_str"]
+        failures = row["failures"]
+        total = row["total"]
+        rate = failures / total if total > 0 else 0
+        # Do a one-tailed binomial test comparing this cell to overall rate.
+        overall_rate = overall_rates.get(animal, 0)
+        # Only test if the cell's rate is higher than overall.
+        cell_significant = False
+        if total > 0 and rate > overall_rate:
+            bt = binomtest(failures, n=total, p=overall_rate, alternative="greater")
+            if bt.pvalue < 0.05:
+                cell_significant = True
+        # Format cell content.
+        content = f"{rate:.1%} (n={total})"
+        grid[animal][month] = (content, cell_significant)
+
+    # Build HTML.
+    html = []
+    html.append("<html><head><meta charset='UTF-8'><title>Failure Rate Grid</title>")
+    html.append("""
+    <style>
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+    th { background-color: #f2f2f2; }
+    .significant { background-color: #ffcccc; }
+    </style>
+    """)
+    html.append("</head><body>")
+    html.append("<h2>Top {} Animals Failure Rate Grid</h2>".format(top_n))
+    html.append("<table>")
+    # Header row.
+    header = "<tr><th>Animal</th>"
+    for month in all_months:
+        header += f"<th>{month}</th>"
+    header += "</tr>"
+    html.append(header)
+    # Data rows.
+    for animal in animal_list:
+        row_html = f"<tr><td>{animal}</td>"
+        for month in all_months:
+            cell = grid[animal][month]
+            if cell:
+                content, sig = cell
+                td_class = 'significant' if sig else ''
+                row_html += f"<td class='{td_class}'>{content}</td>"
+            else:
+                row_html += "<td></td>"
+        row_html += "</tr>"
+        html.append(row_html)
+    html.append("</table>")
+    html.append("</body></html>")
+    html_str = "\n".join(html)
+
+    # Write to file.
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(html_str)
+    print(f"Grid HTML file written to {output_file}")
+
 def main():
     parser = argparse.ArgumentParser(
         description="Chi-square analysis of run table monthly failure rates.")
     parser.add_argument("--animal", type=str, help="Analyze a specific animal (optional)")
     parser.add_argument("--since", type=str, choices=["day", "week", "month", "year"],
                         help="Limit data to events since this time period (e.g., 'day', 'week', 'month', 'year')")
+    parser.add_argument("--grid", type=int, help="Generate an HTML grid for the top x animals")
     args = parser.parse_args()
 
     # Connect to the database using user jbrazeal.
@@ -217,6 +303,18 @@ def main():
     overall_dates = get_overall_dates(conn, animal=args.animal, since=args.since)
     conn.close()
 
+    # If grid option is provided, generate the HTML grid.
+    if args.grid:
+        # For grid view, we want all animals with sufficient data.
+        summary_df = analyze_all_animals(df_monthly, overall_dates)
+        if summary_df.empty:
+            print("No animals with sufficient data to generate grid.")
+        else:
+            generate_grid_html(summary_df, df_monthly, top_n=args.grid)
+        # Exit after grid generation.
+        return
+
+    # If analyzing a specific animal, show detailed view.
     if args.animal:
         summary, detailed = analyze_animal(df_monthly, overall_dates, args.animal)
         if summary is None:
@@ -228,6 +326,7 @@ def main():
             print("\nDetailed monthly data (ordered by date ascending):")
             print(detailed.to_string(index=False))
     else:
+        # Otherwise, show summary for all animals, ordered by highest failure rate descending.
         summary_df = analyze_all_animals(df_monthly, overall_dates)
         if summary_df.empty:
             print("No animals with sufficient data to make a decision.")
