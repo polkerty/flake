@@ -4,6 +4,11 @@ import psycopg2
 import pandas as pd
 from scipy.stats import chi2, binomtest
 import datetime
+import requests
+
+
+from llm import explain_error
+from scrape import extract_log_content
 
 app = Flask(__name__)
 
@@ -269,6 +274,51 @@ def snapshots():
             "log_link": log_link
         })
     return jsonify(snapshots_list)
+
+@app.route("/explain", methods=["GET"])
+def explain():
+    """
+    Given an animal and a bucket (a date string in YYYY-MM-DD format) along with the current granularity,
+    query the database for all snapshots in that bucket. For each snapshot, return the timestamp,
+    result (success/failure), branch, commit, fail_stage and a log URL.
+    """
+    animal = request.args.get("animal")
+    commit = request.args.get("commit")
+
+    conn = get_db_connection()
+    query = f"""
+        SELECT animal, commit, snapshot, fail_stage
+        FROM run
+        WHERE animal = %s AND commit = %s
+        ORDER BY snapshot;
+    """
+    cur = conn.cursor()
+    cur.execute(query, (animal, commit))
+    rows = cur.fetchall()
+    conn.close()
+    for row in rows:
+        animal, commit, snap_ts, fail_stage = row
+
+        # 1. fetch logs
+        snap_str = snap_ts.strftime("%Y-%m-%d %H:%M:%S")
+        log_link = f"https://buildfarm.postgresql.org/cgi-bin/show_log.pl?nm={animal}&dt={snap_str}"
+        log_page = requests.get(log_link).text
+        logs = extract_log_content(log_page)
+
+        # 2. get patch
+        patch_link = f'https://github.com/postgres/postgres/commit/{commit}.patch'
+        patch = requests.get(patch_link).text
+
+        # 3. analyze
+        explanation = explain_error(logs, patch)
+
+        result = {
+            "assessment": explanation,
+            "patch": patch,
+            "logs": logs
+        }    
+
+    return jsonify(result)
 
 if __name__ == "__main__":
     app.run(debug=True)

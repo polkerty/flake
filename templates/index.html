@@ -101,6 +101,22 @@
   </div>
 </div>
 
+<div class="modal fade" id="explanationModal" tabindex="-1" role="dialog" aria-labelledby="explanationModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Did commit <span id="explanationCommit"></span> break stage <span id="explanationError"></span>?</h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body" id="explanationContent">
+          <!-- Explanation details will be loaded here -->
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- jQuery, Bootstrap JS and our custom JS -->
 <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
 <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
