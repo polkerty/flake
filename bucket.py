@@ -12,11 +12,11 @@ ALLOWED_PERIODS = {
     "year": "1 year"
 }
 
-def get_monthly_data(conn, animal=None, since=None):
+def get_aggregated_data(conn, animal=None, since=None, granularity="month"):
     """
-    Retrieve monthly aggregated failure data from the run table.
+    Retrieve aggregated failure data from the run table.
     Optionally filter by a specific animal and/or only include events since a given period.
-    Only monthly buckets with more than 25 total events are returned.
+    Only buckets with more than 25 total events are returned.
     """
     clauses = []
     params = []
@@ -32,19 +32,20 @@ def get_monthly_data(conn, animal=None, since=None):
     if clauses:
         where_clause = "WHERE " + " AND ".join(clauses)
     
+    # Use the provided granularity (day, week, month, or year) in the date_trunc function.
     query = f"""
     SELECT
         animal,
-        date_trunc('month', snapshot) AS month,
+        date_trunc('{granularity}', snapshot) AS bucket,
         SUM(CASE WHEN fail_stage IS NULL THEN 0 ELSE 1 END) AS failures,
         COUNT(*) AS total
     FROM run
     {where_clause}
-    GROUP BY animal, date_trunc('month', snapshot)
-    ORDER BY animal, month;
+    GROUP BY animal, date_trunc('{granularity}', snapshot)
+    ORDER BY animal, bucket;
     """
     df = pd.read_sql(query, conn, params=params)
-    # Only consider monthly buckets with more than 25 events.
+    # Only consider buckets with more than 25 events.
     df = df[df['total'] > 25]
     return df
 
@@ -80,11 +81,11 @@ def get_overall_dates(conn, animal=None, since=None):
     df = pd.read_sql(query, conn, params=params)
     return df
 
-def analyze_animal(df_monthly, overall_dates, animal):
+def analyze_animal(df_agg, overall_dates, animal):
     # Filter data for the specific animal.
-    data = df_monthly[df_monthly['animal'] == animal].copy()
+    data = df_agg[df_agg['animal'] == animal].copy()
     if data.empty or len(data) < 2:
-        print(f"Not enough monthly buckets with >25 events for animal: {animal}")
+        print(f"Not enough buckets with >25 events for animal: {animal}")
         return None, None
 
     # Overall totals.
@@ -92,7 +93,7 @@ def analyze_animal(df_monthly, overall_dates, animal):
     total_events = data['total'].sum()
     total_successes = total_events - total_failures
     overall_failure_rate = total_failures / total_events if total_events > 0 else None
-    total_months = data['month'].nunique()
+    total_buckets = data['bucket'].nunique()
 
     # Get first and last event dates.
     overall = overall_dates[overall_dates['animal'] == animal]
@@ -117,14 +118,14 @@ def analyze_animal(df_monthly, overall_dates, animal):
     dof = len(data) - 1
     if dof <= 0:
         p_value = None
-        test_result = "Not enough monthly buckets to test"
+        test_result = "Not enough buckets to test"
     else:
         p_value = chi2.sf(chi_square_stat, dof)
-        test_result = ("Reject Null Hypothesis: Rates are different across months"
+        test_result = ("Reject Null Hypothesis: Rates are different across periods"
                        if p_value < 0.05 else
                        "Fail to Reject Null Hypothesis: No significant difference in rates")
 
-    # Detailed per-month failure rate.
+    # Detailed per-bucket failure rate.
     data['failure_rate'] = data['failures'] / data['total']
 
     summary = {
@@ -132,7 +133,7 @@ def analyze_animal(df_monthly, overall_dates, animal):
         "total_failures": total_failures,
         "total_events": total_events,
         "failure_rate": overall_failure_rate,
-        "total_months": total_months,
+        "total_buckets": total_buckets,
         "first_event": first_event,
         "last_event": last_event,
         "chi_square_stat": chi_square_stat,
@@ -140,18 +141,18 @@ def analyze_animal(df_monthly, overall_dates, animal):
         "p_value": p_value,
         "result": test_result
     }
-    return summary, data.sort_values("month")  # Order individual animal view by date ascending
+    return summary, data.sort_values("bucket")  # Order individual animal view by date ascending
 
-def analyze_all_animals(df_monthly, overall_dates):
+def analyze_all_animals(df_agg, overall_dates):
     summaries = []
-    for animal, group in df_monthly.groupby('animal'):
+    for animal, group in df_agg.groupby('animal'):
         if len(group) < 2:
-            continue  # Skip animals with insufficient monthly buckets.
+            continue  # Skip animals with insufficient buckets.
         total_failures = group['failures'].sum()
         total_events = group['total'].sum()
         total_successes = total_events - total_failures
         overall_failure_rate = total_failures / total_events if total_events > 0 else None
-        total_months = group['month'].nunique()
+        total_buckets = group['bucket'].nunique()
 
         overall = overall_dates[overall_dates['animal'] == animal]
         first_event = overall['first_event'].iloc[0] if not overall.empty else None
@@ -173,13 +174,13 @@ def analyze_all_animals(df_monthly, overall_dates):
         if dof <= 0:
             continue  # Skip animals with insufficient data for a chi-square test.
         p_value = chi2.sf(chi_square_stat, dof)
-        test_result = ("Reject Null Hypothesis: Rates are different across months"
+        test_result = ("Reject Null Hypothesis: Rates are different across periods"
                        if p_value < 0.05 else
                        "Fail to Reject Null Hypothesis: No significant difference in rates")
         
-        # Compute spike: difference between worst monthly failure rate and overall rate.
-        monthly_rates = group['failures'] / group['total']
-        max_rate = monthly_rates.max()
+        # Compute spike: difference between worst bucket failure rate and overall rate.
+        bucket_rates = group['failures'] / group['total']
+        max_rate = bucket_rates.max()
         spike = max_rate - overall_failure_rate if overall_failure_rate is not None else None
 
         summaries.append({
@@ -187,7 +188,7 @@ def analyze_all_animals(df_monthly, overall_dates):
             "total_failures": total_failures,
             "total_events": total_events,
             "failure_rate": overall_failure_rate,
-            "total_months": total_months,
+            "total_buckets": total_buckets,
             "first_event": first_event,
             "last_event": last_event,
             "chi_square_stat": chi_square_stat,
@@ -203,34 +204,34 @@ def analyze_all_animals(df_monthly, overall_dates):
     else:
         return pd.DataFrame()
 
-def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
+def generate_grid_html(summary_df, df_agg, top_n, output_file="grid.html"):
     """
-    Generate an HTML grid showing the top_n animals (rows) and months (columns).
-    Each cell shows the monthly failure rate and total count.
-    If the monthly failure rate is significantly higher (one-tailed binomial test, p < 0.05)
+    Generate an HTML grid showing the top_n animals (rows) and buckets (columns).
+    Each cell shows the bucket failure rate and total count.
+    If the bucket failure rate is significantly higher (one-tailed binomial test, p < 0.05)
     than the animal's overall failure rate, the cell is colored red.
     """
     # Filter to top_n animals.
     top_animals = summary_df.head(top_n)
     animal_list = top_animals["animal"].tolist()
 
-    # Filter monthly data for these animals.
-    df = df_monthly[df_monthly["animal"].isin(animal_list)].copy()
-    # Ensure 'month' is a datetime; then format as YYYY-MM.
-    df["month_str"] = pd.to_datetime(df["month"]).dt.strftime("%Y-%m")
+    # Filter aggregated data for these animals.
+    df = df_agg[df_agg["animal"].isin(animal_list)].copy()
+    # Ensure 'bucket' is a datetime; then format as YYYY-MM-DD (or YYYY-MM if monthly).
+    df["bucket_str"] = pd.to_datetime(df["bucket"]).dt.strftime("%Y-%m-%d")
     
-    # Get the union of all months for these animals, sorted ascending.
-    all_months = sorted(df["month_str"].unique())
+    # Get the union of all buckets for these animals, sorted ascending.
+    all_buckets = sorted(df["bucket_str"].unique())
 
-    # Build grid data: a dict of dict: grid[animal][month] = cell content
-    grid = {animal: {month: "" for month in all_months} for animal in animal_list}
+    # Build grid data: a dict of dict: grid[animal][bucket] = cell content
+    grid = {animal: {bucket: "" for bucket in all_buckets} for animal in animal_list}
     # Also, get overall failure rates for each animal from summary.
     overall_rates = top_animals.set_index("animal")["failure_rate"].to_dict()
 
     # For each record, fill the grid.
     for _, row in df.iterrows():
         animal = row["animal"]
-        month = row["month_str"]
+        bucket = row["bucket_str"]
         failures = row["failures"]
         total = row["total"]
         rate = failures / total if total > 0 else 0
@@ -242,7 +243,7 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
             if bt.pvalue < 0.05:
                 cell_significant = True
         content = f"{rate:.1%} (n={total})"
-        grid[animal][month] = (content, cell_significant)
+        grid[animal][bucket] = (content, cell_significant)
 
     # Build HTML.
     html = []
@@ -259,14 +260,14 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
     html.append("<h2>Top {} Animals Failure Rate Grid</h2>".format(top_n))
     html.append("<table>")
     header = "<tr><th>Animal</th>"
-    for month in all_months:
-        header += f"<th>{month}</th>"
+    for bucket in all_buckets:
+        header += f"<th>{bucket}</th>"
     header += "</tr>"
     html.append(header)
     for animal in animal_list:
         row_html = f"<tr><td>{animal}</td>"
-        for month in all_months:
-            cell = grid[animal][month]
+        for bucket in all_buckets:
+            cell = grid[animal][bucket]
             if cell:
                 content, sig = cell
                 td_class = 'significant' if sig else ''
@@ -285,29 +286,32 @@ def generate_grid_html(summary_df, df_monthly, top_n, output_file="grid.html"):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Chi-square analysis of run table monthly failure rates.")
+        description="Chi-square analysis of run table failure rates with variable granularity.")
     parser.add_argument("--animal", type=str, help="Analyze a specific animal (optional)")
     parser.add_argument("--since", type=str, choices=["day", "week", "month", "year"],
                         help="Limit data to events since this time period (e.g., 'day', 'week', 'month', 'year')")
+    parser.add_argument("--granularity", type=str, choices=["day", "week", "month", "year"],
+                        default="month",
+                        help="Granularity for analysis buckets (e.g., 'day', 'week', 'month', 'year')")
     parser.add_argument("--grid", type=int, help="Generate an HTML grid for the top x animals")
-    parser.add_argument("--spikes", action="store_true", help="Sort grid by spike (difference between worst monthly rate and overall rate)")
+    parser.add_argument("--spikes", action="store_true", help="Sort grid by spike (difference between worst bucket rate and overall rate)")
     args = parser.parse_args()
 
     conn = psycopg2.connect(
         dbname="flake",
         host="localhost",
-        port=5258,
+        port=6565,
         user="jbrazeal",   # your user
         password=""        # adjust if needed
     )
 
-    df_monthly = get_monthly_data(conn, animal=args.animal, since=args.since)
+    df_agg = get_aggregated_data(conn, animal=args.animal, since=args.since, granularity=args.granularity)
     overall_dates = get_overall_dates(conn, animal=args.animal, since=args.since)
     conn.close()
 
     # If grid option is provided, generate the HTML grid.
     if args.grid:
-        summary_df = analyze_all_animals(df_monthly, overall_dates)
+        summary_df = analyze_all_animals(df_agg, overall_dates)
         if summary_df.empty:
             print("No animals with sufficient data to generate grid.")
         else:
@@ -316,21 +320,21 @@ def main():
                 summary_df = summary_df.sort_values("spike", ascending=False, na_position="last")
             else:
                 summary_df = summary_df.sort_values("failure_rate", ascending=False, na_position="last")
-            generate_grid_html(summary_df, df_monthly, top_n=args.grid)
+            generate_grid_html(summary_df, df_agg, top_n=args.grid)
         return
 
     if args.animal:
-        summary, detailed = analyze_animal(df_monthly, overall_dates, args.animal)
+        summary, detailed = analyze_animal(df_agg, overall_dates, args.animal)
         if summary is None:
             print(f"No sufficient data for animal '{args.animal}' to make a decision.")
         else:
             print("Summary:")
             for key, value in summary.items():
                 print(f"{key:20s}: {value}")
-            print("\nDetailed monthly data (ordered by date ascending):")
+            print("\nDetailed data (ordered by date ascending):")
             print(detailed.to_string(index=False))
     else:
-        summary_df = analyze_all_animals(df_monthly, overall_dates)
+        summary_df = analyze_all_animals(df_agg, overall_dates)
         if summary_df.empty:
             print("No animals with sufficient data to make a decision.")
         else:
