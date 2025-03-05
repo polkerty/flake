@@ -15,7 +15,7 @@ $(document).ready(function(){
                     content += "<td>" + item.snapshot + "</td>";
                     content += "<td>" + item.status + "</td>";
                     content += "<td>" + item.branch + "</td>";
-                    content += "<td>" + item.commit + "</td>";
+                    content += "<td><a href='https://github.com/postgres/postgres/commit/" + item.commit + "'>" + item.commit + "</td>";
                     content += "<td>" + (item.fail_stage || "") + "</td>";
                     content += "<td><a href='" + item.log_link + "' target='_blank'>View Logs</a></td>";
                     content += "</tr>";
