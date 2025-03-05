@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Failure Rate Grid</title>
+    <!-- Bootstrap CSS -->
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        table { border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; cursor: pointer; }
+        th { background-color: #f2f2f2; }
+        .significant { background-color: #ffcccc; }
+    </style>
+</head>
+<body>
+<div class="container mt-4">
+    <h2>Failure Rate Analysis</h2>
+    <form method="get" class="form-inline mb-4">
+        <div class="form-group mr-2">
+            <label for="animal" class="mr-2">Animal:</label>
+            <input type="text" id="animal" name="animal" value="{{ animal }}" class="form-control">
+        </div>
+        <div class="form-group mr-2">
+            <label for="since" class="mr-2">Since:</label>
+            <select id="since" name="since" class="form-control">
+                <option value="day" {% if since=='day' %}selected{% endif %}>Day</option>
+                <option value="week" {% if since=='week' %}selected{% endif %}>Week</option>
+                <option value="month" {% if since=='month' %}selected{% endif %}>Month</option>
+                <option value="year" {% if since=='year' %}selected{% endif %}>Year</option>
+            </select>
+        </div>
+        <div class="form-group mr-2">
+            <label for="granularity" class="mr-2">Granularity:</label>
+            <select id="granularity" name="granularity" class="form-control">
+                <option value="day" {% if granularity=='day' %}selected{% endif %}>Day</option>
+                <option value="week" {% if granularity=='week' %}selected{% endif %}>Week</option>
+                <option value="month" {% if granularity=='month' %}selected{% endif %}>Month</option>
+                <option value="year" {% if granularity=='year' %}selected{% endif %}>Year</option>
+            </select>
+        </div>
+        <div class="form-group mr-2">
+            <label for="top_n" class="mr-2">Top N Animals:</label>
+            <input type="number" id="top_n" name="top_n" value="{{ top_n }}" class="form-control" min="1">
+        </div>
+        <div class="form-group mr-2">
+            <div class="form-check">
+                <input type="checkbox" id="spikes" name="spikes" class="form-check-input" {% if spikes %}checked{% endif %}>
+                <label for="spikes" class="form-check-label">Sort by Spike</label>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Update</button>
+    </form>
+    
+    {% if animals %}
+    <h3>Failure Rate Grid</h3>
+    <table class="table table-bordered">
+        <thead>
+            <tr>
+                <th>Animal</th>
+                {% for bucket in buckets %}
+                <th>{{ bucket }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for animal in animals %}
+            <tr>
+                <td>{{ animal }}</td>
+                {% for bucket in buckets %}
+                {% set cell = grid.get(animal, {}).get(bucket) %}
+                {% if cell %}
+                <td class="{% if cell[1] %}significant{% endif %}" data-animal="{{ animal }}" data-bucket="{{ bucket }}">
+                    {{ cell[0] }}
+                </td>
+                {% else %}
+                <td></td>
+                {% endif %}
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No data available for the selected parameters.</p>
+    {% endif %}
+</div>
+
+<!-- Modal for snapshots -->
+<div class="modal fade" id="snapshotModal" tabindex="-1" role="dialog" aria-labelledby="snapshotModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Snapshots for <span id="modalAnimal"></span> - Bucket <span id="modalBucket"></span></h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body" id="snapshotContent">
+          <!-- Snapshot details will be loaded here -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- jQuery, Bootstrap JS and our custom JS -->
+<script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
