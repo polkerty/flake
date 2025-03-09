@@ -52,7 +52,7 @@ def chunk_log(log_text: str, magic: str = MAGIC):
 
     return chunks
 
-def fetch_and_chunk_logs(conn_params):
+def fetch_and_chunk_logs(conn_params, lookback):
     """
     Use a named (server-side) cursor to stream rows from Postgres,
     parse each log, and return JSON of chunked results.
@@ -62,6 +62,7 @@ def fetch_and_chunk_logs(conn_params):
     # Connect to Postgres
     conn = psycopg2.connect(**conn_params)
     with conn.cursor(name="log_stream_cursor", cursor_factory=DictCursor) as cur:
+        # Use parameter binding for the interval
         query = """
             SELECT
                 sysname,
@@ -74,10 +75,10 @@ def fetch_and_chunk_logs(conn_params):
             FROM build_status
             WHERE stage != 'OK'
               AND build_status.report_time IS NOT NULL
-              AND snapshot > current_date - interval '6 months'
+              AND snapshot > current_date - %s::interval
             ORDER BY snapshot ASC
         """
-        cur.execute(query)
+        cur.execute(query, (lookback,))
 
         # Iterate rows *streaming*, not all at once
         for row in cur:
@@ -118,6 +119,9 @@ def main():
                         help="Database user. Default from $PGUSER or 'postgres'.")
     parser.add_argument("--password", default=os.getenv("PGPASSWORD", ""),
                         help="Database password. Default from $PGPASSWORD or empty.")
+    parser.add_argument("--lookback", default="6 months",
+                        help="Lookback period recognized by PostgreSQL interval syntax (e.g. '2 days', '3 weeks', '1 year'). "
+                             "Default: '6 months'.")
 
     args = parser.parse_args()
 
@@ -130,7 +134,7 @@ def main():
         "password": args.password
     }
 
-    json_output = fetch_and_chunk_logs(conn_params)
+    json_output = fetch_and_chunk_logs(conn_params, args.lookback)
     print(json_output)
 
 if __name__ == "__main__":
