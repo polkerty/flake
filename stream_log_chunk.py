@@ -52,7 +52,7 @@ def chunk_log(log_text: str, magic: str = MAGIC):
 
     return chunks
 
-def fetch_and_chunk_logs(conn_params, lookback):
+def fetch_and_chunk_logs(conn_params, lookback, max_chars):
     """
     Use a named (server-side) cursor to stream rows from Postgres,
     parse each log, and return JSON of chunked results.
@@ -87,8 +87,8 @@ def fetch_and_chunk_logs(conn_params, lookback):
 
             # Break out the log into chunks
             for filename, text_section in chunk_log(log_text, MAGIC):
-                # Keep only the last 1000 characters
-                text_section = text_section[-1000:]
+                # Keep only the last `max_chars` characters
+                text_section = text_section[-max_chars:]
 
                 results.append({
                     "sysname": row["sysname"],
@@ -120,8 +120,10 @@ def main():
     parser.add_argument("--password", default=os.getenv("PGPASSWORD", ""),
                         help="Database password. Default from $PGPASSWORD or empty.")
     parser.add_argument("--lookback", default="6 months",
-                        help="Lookback period recognized by PostgreSQL interval syntax (e.g. '2 days', '3 weeks', '1 year'). "
-                             "Default: '6 months'.")
+                        help="Lookback period recognized by PostgreSQL interval syntax "
+                             "(e.g. '2 days', '3 weeks', '1 year'). Default: '6 months'.")
+    parser.add_argument("--max-chars", default=1000, type=int,
+                        help="Number of characters to include for each chunk. Default: 1000.")
 
     args = parser.parse_args()
 
@@ -134,7 +136,7 @@ def main():
         "password": args.password
     }
 
-    json_output = fetch_and_chunk_logs(conn_params, args.lookback)
+    json_output = fetch_and_chunk_logs(conn_params, args.lookback, args.max_chars)
     print(json_output)
 
 if __name__ == "__main__":
