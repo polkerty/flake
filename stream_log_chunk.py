@@ -3,6 +3,7 @@
 import os
 import json
 import argparse
+import getpass
 
 import psycopg2
 from psycopg2.extras import DictCursor
@@ -52,17 +53,19 @@ def chunk_log(log_text: str, magic: str = MAGIC):
 
     return chunks
 
-def fetch_and_chunk_logs(conn_params, lookback, max_chars):
+def fetch_and_chunk_logs(conninfo_or_params, lookback, max_chars):
     """
     Use a named (server-side) cursor to stream rows from Postgres,
     parse each log, and return JSON of chunked results.
     """
-    results = []
+    # If we got a string, treat it as conninfo; if we got a dict, unpack it.
+    if isinstance(conninfo_or_params, str):
+        conn = psycopg2.connect(conninfo_or_params)
+    else:
+        conn = psycopg2.connect(**conninfo_or_params)
 
-    # Connect to Postgres
-    conn = psycopg2.connect(**conn_params)
+    results = []
     with conn.cursor(name="log_stream_cursor", cursor_factory=DictCursor) as cur:
-        # Use parameter binding for the interval
         query = """
             SELECT
                 sysname,
@@ -106,37 +109,83 @@ def fetch_and_chunk_logs(conn_params, lookback, max_chars):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch logs from Postgres, chunk by MAGIC delimiter, output JSON."
+        description="Fetch logs from Postgres, chunk by MAGIC delimiter, output JSON.",
+        add_help=False
     )
-    # psql-style environment variable defaults
-    parser.add_argument("--host", default=os.getenv("PGHOST", "localhost"),
-                        help="Database server host. Default from $PGHOST or 'localhost'.")
-    parser.add_argument("--port", default=os.getenv("PGPORT", 5432), type=int,
-                        help="Database server port. Default from $PGPORT or 5432.")
-    parser.add_argument("--dbname", default=os.getenv("PGDATABASE", "postgres"),
-                        help="Database name. Default from $PGDATABASE or 'postgres'.")
-    parser.add_argument("--user", default=os.getenv("PGUSER", "postgres"),
-                        help="Database user. Default from $PGUSER or 'postgres'.")
-    parser.add_argument("--password", default=os.getenv("PGPASSWORD", ""),
-                        help="Database password. Default from $PGPASSWORD or empty.")
+
+    # Then add a custom help flag under something else, e.g. `-H/--help`
+    parser.add_argument(
+        "-H", "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Show this help message and exit"
+    )
+
+
+    # psql-style short options for connection
+    parser.add_argument("-h", "--host", default=os.getenv("PGHOST", "localhost"),
+                        help="Database server host. Defaults from $PGHOST or 'localhost'.")
+    parser.add_argument("-p", "--port", default=os.getenv("PGPORT", 5432), type=int,
+                        help="Database server port. Defaults from $PGPORT or 5432.")
+    parser.add_argument("-d", "--dbname", default=os.getenv("PGDATABASE", "postgres"),
+                        help="Database name. Defaults from $PGDATABASE or 'postgres'.")
+    parser.add_argument("-U", "--user", default=os.getenv("PGUSER", "postgres"),
+                        help="Database user. Defaults from $PGUSER or 'postgres'.")
+
+    # The following two aren’t exactly 1:1 with psql, but approximate the idea:
+    parser.add_argument("-w", "--no-password", action="store_true",
+                        help="Never prompt for password. (Sets an empty password.)")
+    parser.add_argument("-W", "--password", action="store_true",
+                        help="Force password prompt. (Will ignore $PGPASSWORD if set.)")
+
+    # We also allow a direct connection string if desired.
+    parser.add_argument("--conninfo",
+                        help="Full libpq connection string, e.g. 'host=... port=... dbname=... user=...'")
+
+    # Additional query/filter parameters
     parser.add_argument("--lookback", default="6 months",
                         help="Lookback period recognized by PostgreSQL interval syntax "
                              "(e.g. '2 days', '3 weeks', '1 year'). Default: '6 months'.")
     parser.add_argument("--max-chars", default=1000, type=int,
-                        help="Number of characters to include for each chunk. Default: 1000.")
+                        help="Number of characters to include from the end of each chunk. Default: 1000.")
 
     args = parser.parse_args()
 
-    # Build connection parameters dictionary
-    conn_params = {
-        "host": args.host,
-        "port": args.port,
-        "dbname": args.dbname,
-        "user": args.user,
-        "password": args.password
-    }
+    # Determine password
+    # 1) If --conninfo is provided, we'll not parse host/port/dbname/user.
+    # 2) Else build a conn_params dict. We approximate psql's approach for -w/-W.
+    if args.conninfo:
+        # They gave a direct connection string - just use it.
+        conninfo_or_params = args.conninfo
+        # If user also did -W, we can force a prompt for password
+        if args.password:
+            pw = getpass.getpass("Password: ")
+            # Append or override password=... in the conninfo
+            conninfo_or_params += f" password='{pw}'"
+        elif args.no_password:
+            # Force empty password in conninfo
+            conninfo_or_params += " password=''"
+    else:
+        # Build connection parameters
+        pg_password_env = os.getenv("PGPASSWORD", "")
+        if args.password:
+            # Force prompt
+            pg_password = getpass.getpass("Password: ")
+        elif args.no_password:
+            # Force empty
+            pg_password = ""
+        else:
+            pg_password = pg_password_env
 
-    json_output = fetch_and_chunk_logs(conn_params, args.lookback, args.max_chars)
+        conninfo_or_params = {
+            "host": args.host,
+            "port": args.port,
+            "dbname": args.dbname,
+            "user": args.user,
+            "password": pg_password
+        }
+
+    json_output = fetch_and_chunk_logs(conninfo_or_params, args.lookback, args.max_chars)
     print(json_output)
 
 if __name__ == "__main__":
